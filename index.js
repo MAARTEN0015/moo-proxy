@@ -67,79 +67,136 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (clientWs, req) => {
-  const params = url.parse(req.url, true).query;
-  const target = params.target;
-  
+  const params = new URL(req.url, `http://${req.headers.host}`).searchParams;
+  const target = params.get('target');
+
   if (!target) {
     clientWs.close(1008, 'Missing target URL');
     return;
   }
 
-  // Zwiększ liczniki
   activeConnections++;
   totalConnections++;
-  console.log(`[PROXY] New connection (active: ${activeConnections}) to: ${target}`);
-  
-  let serverWs;
+
+  let serverWs = null;
+  let closed = false;
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+
+    activeConnections = Math.max(0, activeConnections - 1);
+
+    if (
+      serverWs &&
+      (serverWs.readyState === WebSocket.OPEN ||
+       serverWs.readyState === WebSocket.CONNECTING)
+    ) {
+      try {
+        serverWs.close();
+      } catch {}
+    }
+  };
+
+  console.log(
+    `[PROXY] client connected (active=${activeConnections})`
+  );
+
   try {
     serverWs = new WebSocket(target, {
       headers: {
-        'Origin': 'https://moomoo.io',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        Origin: 'https://moomoo.io',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
       },
       handshakeTimeout: 10000
     });
-  } catch (e) {
-    console.error('[PROXY] Failed to connect:', e.message);
-    clientWs.close(1011, 'Failed to connect to target');
+  } catch (err) {
+    console.error('[PROXY] upstream creation failed:', err);
+    cleanup();
+
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.close(1011, 'Upstream connection failed');
+    }
+
     return;
   }
 
   serverWs.binaryType = 'arraybuffer';
 
   serverWs.on('open', () => {
-    console.log('[PROXY] Connected to MooMoo server');
+    console.log('[PROXY] upstream connected');
   });
 
   serverWs.on('message', (data, isBinary) => {
     if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(data, { binary: isBinary });
+      try {
+        clientWs.send(data, { binary: isBinary });
+      } catch (err) {
+        console.error('[PROXY] client send failed:', err.message);
+      }
     }
   });
 
   serverWs.on('close', (code, reason) => {
-    console.log(`[PROXY] Server closed: ${code} ${reason || ''}`);
+    const text = reason ? reason.toString() : '';
+
+    console.warn(
+      `[PROXY] upstream closed: code=${code} reason=${text}`
+    );
+
+    cleanup();
+
     if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(code, reason);
+      clientWs.close(
+        code >= 1000 && code <= 4999 ? code : 1011,
+        text || 'Upstream closed'
+      );
     }
   });
 
   serverWs.on('error', (err) => {
-    console.error('[PROXY] Server error:', err.message);
+    console.error('[PROXY] upstream error:', err.message);
+
     if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(1011, 'Server error');
+      clientWs.close(1011, 'Upstream error');
     }
+
+    cleanup();
   });
 
   clientWs.on('message', (data, isBinary) => {
     if (serverWs.readyState === WebSocket.OPEN) {
-      serverWs.send(data, { binary: isBinary });
+      try {
+        serverWs.send(data, { binary: isBinary });
+      } catch (err) {
+        console.error('[PROXY] upstream send failed:', err.message);
+      }
     }
   });
 
   clientWs.on('close', (code, reason) => {
-    activeConnections--;
-    console.log(`[PROXY] Client closed (active: ${activeConnections}): ${code}`);
-    if (serverWs.readyState === WebSocket.OPEN) {
-      serverWs.close();
-    }
+    console.log(
+      `[PROXY] client closed: code=${code} reason=${reason || ''}`
+    );
+
+    cleanup();
+  });
+  serverWs.on('close', (code, reason) => {
+    console.log(
+      `[PROXY] MOO upstream CLOSED code=${code} reason=${reason?.toString() || ''}`
+    );
+  });
+  
+  clientWs.on('close', (code, reason) => {
+    console.log(
+      `[PROXY] BROWSER CLOSED code=${code} reason=${reason?.toString() || ''}`
+    );
   });
 
   clientWs.on('error', (err) => {
-    console.error('[PROXY] Client error:', err.message);
-    if (serverWs.readyState === WebSocket.OPEN) {
-      serverWs.close();
-    }
+    console.error('[PROXY] client error:', err.message);
+    cleanup();
   });
 });
 
