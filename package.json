@@ -2,5 +2,7 @@
   "name": "moo-proxy",
   "version": "1.0.0",
   "scripts": { "start": "node index.js" },
-  "dependencies": {}
+  "dependencies": {
+    "ws": "8.17.1"
+  }
 }
