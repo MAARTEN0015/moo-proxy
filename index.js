@@ -1,55 +1,45 @@
 const http = require("http");
-const net = require("net");
+const tls = require("tls");
 const { URL } = require("url");
 
 const server = http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("moo-proxy ok");
+    res.writeHead(200);
+    res.end("ok");
 });
 
 server.on("upgrade", (req, socket, head) => {
     let target;
     try {
-        const reqUrl = new URL(req.url, "http://localhost");
-        const targetParam = reqUrl.searchParams.get("target");
-        if (!targetParam) throw new Error("no target");
-        target = new URL(targetParam);
-    } catch (e) {
-        console.error("[proxy] bad request:", e.message);
+        const u = new URL(req.url, "http://x");
+        target = new URL(u.searchParams.get("target"));
+    } catch(e) {
         socket.destroy();
         return;
     }
 
-    const port = target.port
-        ? parseInt(target.port)
-        : target.protocol === "wss:" ? 443 : 80;
+    const port = target.port ? parseInt(target.port) : 443;
 
-    const upstream = net.connect(port, target.hostname, () => {
-        const headers = [
-            `GET ${target.pathname}${target.search} HTTP/1.1`,
-            `Host: ${target.host}`,
-            `Upgrade: websocket`,
-            `Connection: Upgrade`,
-            `Sec-WebSocket-Version: 13`,
-            `Sec-WebSocket-Key: ${req.headers["sec-websocket-key"] || "dGhlIHNhbXBsZSBub25jZQ=="}`,
-        ];
-        if (req.headers["sec-websocket-protocol"])
-            headers.push(`Sec-WebSocket-Protocol: ${req.headers["sec-websocket-protocol"]}`);
-        headers.push("\r\n");
-        upstream.write(headers.join("\r\n"));
+    const upstream = tls.connect({ host: target.hostname, port, servername: target.hostname }, () => {
+        const key = req.headers["sec-websocket-key"] || "dGhlIHNhbXBsZSBub25jZQ==";
+        upstream.write(
+            `GET ${target.pathname}${target.search} HTTP/1.1\r\n` +
+            `Host: ${target.host}\r\n` +
+            `Upgrade: websocket\r\n` +
+            `Connection: Upgrade\r\n` +
+            `Sec-WebSocket-Version: 13\r\n` +
+            `Sec-WebSocket-Key: ${key}\r\n\r\n`
+        );
     });
 
-    upstream.on("error", (e) => { console.error("[proxy] upstream:", e.message); socket.destroy(); });
-    socket.on("error", () => upstream.destroy());
-
-    upstream.once("data", (chunk) => {
+    upstream.once("data", chunk => {
         socket.write(chunk);
-        upstream.pipe(socket);
         socket.pipe(upstream);
+        upstream.pipe(socket);
     });
 
+    upstream.on("error", () => socket.destroy());
+    socket.on("error", () => upstream.destroy());
     if (head && head.length) upstream.write(head);
 });
 
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => console.log(`[proxy] listening on port ${PORT}`));
+server.listen(process.env.PORT || 8080, () => console.log("proxy up"));
